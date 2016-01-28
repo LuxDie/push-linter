@@ -40,11 +40,11 @@ return function(context, callback) {
       }
     };
     return request.getAsync(reqData).spread(function (response, body) {
-      if (response.statusCode === 200) {
-        return body;
-      } else {
-        callback(MESSAGES.FAIL_READ + ': ' + response.statusCode + ' ' + JSON.parse(body).message);
-      }
+        if (response.statusCode === 200) {
+          return body;
+        } else {
+          callback(MESSAGES.FAIL_READ + ': ' + response.statusCode + ' ' + JSON.parse(body).message);
+        }
       }).catch(function (error) {
         callback(MESSAGES.FAIL_READ + ': ' + error.message);
       });
@@ -58,53 +58,61 @@ return function(context, callback) {
       return { path: file };
     });
   }
+  
+  // Scan some code for JS errors
+  function lint(content) {
+    jshint(content, jsHintConfig);
+    return jshint.errors ? jshint.errors.length : 0;
+  }
 
   // Make a report for each commit
   commits.forEach(function (commit) {
-    var reqData, jsFiles, jsFilesContents, jsFilesErr;
+    var reqData, jsFiles, jsFilesErr;
 
     jsFiles = getJsFiles(commit);
-    // jsFilesContents holds a collection of 1 promise for each JS file in the commit, which resolve to the contents of the files
-    jsFilesContents = jsFiles.map(function (file) {
-      return readFile(file.path, commit).then(function(content) {
-        // Scan each file for JS errors
-        jshint(content, jsHintConfig);
-        // Mark each file with the amount of errors it has, if any
-        file.err = jshint.errors ? jshint.errors.length : 0;
-      });
+    jsFiles.forEach(function (file) {
+      file.content = readFile(file.path, commit)
+        // When content arrives, scan it for errors
+        .then(function(content) {
+          file.err = lint(content);
+        });
     });
 
-    // When all files for the current commit have been scanned, if any errors were found, proceed to report errors as a comment for the
+    // After all contents have been read and scanned, if any errors were found, proceed to report them as a comment for the
     // commit
-    Promise.all(jsFilesContents).then(function () {
-      jsFilesErr = jsFiles.map(function (file) {
-        if (file.err) {
+    Promise
+      .all(jsFiles.map(function (file) {
+        return file.content;
+      }))
+      .then(function () {
+        jsFilesErr = jsFiles.filter(function (file) {
+          return file.err;
+        }).map(function (file) {
           return file.path;
+        });
+        if (jsFilesErr.length) {
+          reqData = {
+            url: commitsUrl.replace('{/sha}', '/' + commit.id) + '/comments',
+            headers: {
+              'User-Agent': userAgent,
+              'Authorization': 'token ' + context.data.github_token
+            },
+            json: {
+              'body': MESSAGES.AUTO + ' - ' + MESSAGES.JS_ERRORS + ': ' + jsFilesErr.join(', ')
+            }
+          };
+          request.postAsync(reqData).spread(function (response, body) {
+            if (response.statusCode === 201) {
+              callback(null, { success: MESSAGES.SUCCESS_COMMENT });
+            } else {
+              callback(MESSAGES.FAIL_COMMENT + ': ' + response.statusCode + ' ' + JSON.parse(body).message);
+            }
+          }).catch(function (error) {
+            callback(MESSAGES.FAIL_COMMENT + ': ' + error.message);
+          });
+        } else {
+          callback(null, { success: MESSAGES.NO_ERRORS });
         }
       });
-      if (jsFilesErr.length) {
-        reqData = {
-          url: commitsUrl.replace('{/sha}', '/' + commit.id) + '/comments',
-          headers: {
-            'User-Agent': userAgent,
-            'Authorization': 'token ' + context.data.github_token
-          },
-          json: {
-            'body': MESSAGES.AUTO + ' - ' + MESSAGES.JS_ERRORS + ': ' + jsFilesErr.join(', ')
-          }
-        };
-        request.postAsync(reqData).spread(function (response, body) {
-          if (response.statusCode === 201) {
-            callback(null, { success: MESSAGES.SUCCESS_COMMENT });
-          } else {
-            callback(MESSAGES.FAIL_COMMENT + ': ' + response.statusCode + ' ' + JSON.parse(body).message);
-          }
-        }).catch(function (error) {
-          callback(MESSAGES.FAIL_COMMENT + ': ' + error.message);
-        });
-      } else {
-        callback(null, { success: MESSAGES.NO_ERRORS });
-      }
-    });
   });
 };
